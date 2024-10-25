@@ -1,22 +1,24 @@
 import psycopg2
 import telebot
 from telebot import types
-from telebot import datetime, timedelta
+from datetime import datetime, timedelta
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
+
 API_TOKEN = '7390952682:AAGwjw7x7JU07V2w-wjD2ATaR1y8meHGnDE'
-bot = telebot.TeleBot(API_TOKEN,)
+bot = telebot.TeleBot(API_TOKEN)
+bot.set_webhook()
 
 
-DATABASE_URL = 'postgresql://Auto-Details:1234@tgbot:5432/users_auto_details'
 
-# States for the FSM
-class UserStates(types.InlineKeyboardMarkup):
+# Определение состояния пользователя — не путать с классом, наследованным от InlineKeyboardMarkup
+class UserStates:
     CONFIRMATION = 'confirmation'
     MODEL = 'model'
     NUMBER = 'number'
-    DATE = 'date'
-    TYPE = 'type'
+    CHOOSING_YEAR = 1
+    CHOOSING_MONTH = 2
+    CHOOSING_DAY = 3
     SERVICE = 'service'
     CONFIRM = 'confirm'
     CONTACT = 'contact'
@@ -24,199 +26,136 @@ class UserStates(types.InlineKeyboardMarkup):
 # Dictionary to store user data
 user_data = {}
 
-# ----------------------- Handlers -----------------------
-
-def get_db_connection():
-    """Функция для получения соединения с PostgreSQL."""
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        return conn
-    except (Exception, psycopg2.Error) as error:
-        print("Ошибка при подключении к базе данных PostgreSQL:", error)
-        return None
-
+# ----------------------- Handlers ----------------------
 @bot.message_handler(commands=['start'])
 def start(message: telebot.types.Message):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(types.KeyboardButton('Записаться на ТО'))
     bot.send_message(message.chat.id,
-                     "👋 Здравствуйте! Вас приветствует Auto-Detail_Bot,\n"
-                     " Хотите записаться на ТО?", reply_markup=markup)
+                     f"👋 Здравствуйте {message.from_user.first_name}! Вас приветствует Auto-Detail_Bot,\n"
+                     "Хотите записаться на ТО?", reply_markup=markup)
 
 # Handle the "Записаться на ТО" button click
 @bot.message_handler(func=lambda message: message.text == "Записаться на ТО")
 def handle_appointment(message):
     # Hide the keyboard and ask for car model
     bot.send_message(message.chat.id,
-                     "🚗 Введите марку и модель автомобиля (например, Toyota Camry):",
+                     "🚗 Введите марку и модель вашего автомобиля :",
                      reply_markup=types.ReplyKeyboardRemove())
 
     # Set state to MODEL
-    bot.set_state(message.chat.id, UserStates.MODEL)
+    if message.chat.id not in user_data:
+        user_data[message.chat.id] = {}
+    user_data[message.chat.id]['state'] = UserStates.MODEL
 
     # Register the next step handler to get the car model
     bot.register_next_step_handler(message, get_car_model)
 
 # Get car model from user
 def get_car_model(message):
-    user_data[message.chat.id] = {} # Initialize user data
     user_data[message.chat.id]['model'] = message.text
 
-    bot.send_message(message.chat.id, f"👌 Отлично! Марка и модель: {user_data[message.chat.id]['model']}\n"
-                                   f"Теперь введите госномер автомобиля:")
+    bot.send_message(
+        message.chat.id, 
+        f"👌 Отлично! Марка и модель: {user_data[message.chat.id]['model']}\n"
+        f"Теперь введите госномер автомобиля (Х111ХХ136/36):"
+    )
 
-    # Set state to NUMBER
-    bot.set_state(message.chat.id, UserStates.NUMBER)
+    # Установка состояния пользователя
+    user_data[message.chat.id]['state'] = UserStates.NUMBER
 
-    bot.register_next_step_handler(message, generate_calendar)
+    bot.register_next_step_handler(message, get_car_number)
 
-# Get car number from user
-def generate_calendar(year=None, month=None):
-    """Generates an inline calendar keyboard."""
-    if year is None:
-        year = datetime.now().year
-    if month is None:
-        month = datetime.now().month
+def get_car_number(message):
+    user_data[message.chat.id]['number'] = message.text
+    
+    bot.send_message(
+        message.chat.id,
+        f"Марка и модель: {user_data[message.chat.id]['model']}\n"
+        f"Госномер: {user_data[message.chat.id]['number']}\n"
+        f"Пожалуйста, выберите год:"
+    )
 
-    # Get the first and last days of the month
-    first_day = datetime(year, month, 1)
-    last_day = datetime(year, month, 1) + timedelta(days=32)
+    # Отправить клавиатуру с выбором года
+    bot.send_message(message.chat.id, "Выберите год:", reply_markup=generate_years())
 
-    # Create the inline keyboard
-    markup = InlineKeyboardMarkup(row_width=7)
-
-    # Add previous and next month buttons
-    if month > 1:
-        markup.add(InlineKeyboardButton("<<", callback_data=f"prev_{year}_{month - 1}"))
-    else:
-        markup.add(InlineKeyboardButton("<<", callback_data=f"prev_{year - 1}_{12}"))
-    markup.add(InlineKeyboardButton(f"{datetime(year, month, 1).strftime('%B')} {year}", callback_data="current"))
-    if month < 12:
-        markup.add(InlineKeyboardButton(">>", callback_data=f"next_{year}_{month + 1}"))
-    else:
-        markup.add(InlineKeyboardButton(">>", callback_data=f"next_{year + 1}_{1}"))
-
-    # Add days of the week
-    markup.add(*[InlineKeyboardButton(day.strftime('%a'), callback_data="week") for day in [first_day + timedelta(days=i) for i in range(7)]])
-
-    # Add days of the month
-    for day in range(1, 32):
-        current_day = first_day + timedelta(days=day)
-        if current_day.month == month:
-            markup.add(InlineKeyboardButton(str(current_day.day), callback_data=f"{current_day.strftime('%Y-%m-%d')}"))
-        else:
-            break
+# Функция генерации кнопок для выбора года
+def generate_years():
+    markup = InlineKeyboardMarkup()
+    current_year = datetime.now().year
+    for year in range(current_year, current_year + 2):
+        markup.add(InlineKeyboardButton(text=str(year), callback_data=f"year_{year}"))
     return markup
 
-# Handle date and time input
-@bot.message_handler(func=lambda message: bot.get_state(message.chat.id) == UserStates.DATE)
-def get_date_and_time(message):
-    # Send the calendar
-    bot.send_message(message.chat.id, "📅 Выберите дату:", reply_markup=generate_calendar())
+# Функция генерации кнопок для выбора месяца
+def generate_months():
+    markup = InlineKeyboardMarkup()
+    months = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь', 'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь']
+    for i, month in enumerate(months, start=1):
+        markup.add(InlineKeyboardButton(text=month, callback_data=f"month_{i}"))
+    return markup
 
-    # Set state to DATE
-    bot.set_state(message.chat.id, UserStates.DATE)
-
-    # Register the next step handler to get the date and time
-    # (The handler will be called when the user clicks a date button)
-    # bot.register_next_step_handler(message, get_time)
-
-# Handle calendar button clicks
-@bot.callback_query_handler(func=lambda call: True)
-def handle_calendar_click(call):
-    # Get the user's state
-    user_state = bot.get_state(call.message.chat.id)
-
-    if user_state == UserStates.DATE:
-        # Handle date selection
-        if call.data.startswith("prev") or call.data.startswith("next"):
-            # Update the calendar
-            year, month = [int(x) for x in call.data.split('_')[1:]]
-            new_calendar = generate_calendar(year, month)
-            bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=new_calendar)
-        elif call.data == "current":
-            # Do nothing
-            pass
-        elif call.data.isdigit():
-            # User selected a date
-            selected_date = call.data
-            user_data[call.message.chat.id]['date'] = selected_date
-            bot.edit_message_text(chat_id=call.message.chat.id, message_id=call.message.message_id,
-                                   text=f"📅 Вы выбрали дату: {selected_date}\n"
-                                   f"Теперь введите время (например, 14:00):")
-            bot.set_state(call.message.chat.id, UserStates.DATE)
-            bot.register_next_step_handler(call.message, get_time)
+def generate_calendar(year, month):
+    markup = InlineKeyboardMarkup()
+    num_days = (datetime(year, month % 12 + 1, 1) - timedelta(days=1)).day
+    for day in range(1, num_days + 1):
+        markup.add(InlineKeyboardButton(text=str(day), callback_data=f"date_{year}_{month}_{day}"))
+    return markup
 
 
-@bot.message_handler(func=lambda message: bot.get_state(message.chat.id) == UserStates.DATE)
-def get_time(message):
+# Обработчик выбора года
+@bot.callback_query_handler(func=lambda call: call.data.startswith('year_'))
+def year_callback(call):
+    chat_id = call.message.chat.id
+    year = call.data.split('_')[1]
+    user_data[chat_id]['year'] = year
+    user_data[chat_id]['state'] = UserStates.CHOOSING_MONTH
+    markup = types.InlineKeyboardMarkup()
+    months = ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12']  # Пример месяцев
+    for month in months:
+        markup.add(types.InlineKeyboardButton(month, callback_data=f'month_{month}'))
+    bot.send_message(chat_id, "Выберите месяц:", reply_markup=markup)
+
+# Обработчик выбора месяца
+@bot.callback_query_handler(func=lambda call: call.data.startswith('month_'))
+def month_callback(call):
+    chat_id = call.message.chat.id
+    month = call.data.split('_')[1]
+    user_data[chat_id]['month'] = month
+    user_data[chat_id]['state'] = UserStates.CHOOSING_DAY
+    markup = types.InlineKeyboardMarkup()
+    days = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23', '24', '25', '26', '27', '28', '29', '30']  # Пример дней
+    for day in days:
+        markup.add(types.InlineKeyboardButton(day, callback_data=f'date_{user_data[chat_id]["year"]}_{month}_{day}'))
+    bot.send_message(chat_id, "Выберите день:", reply_markup=markup)
+
+# Обработчик выбора дня
+@bot.callback_query_handler(func=lambda call: call.data.startswith('date_'))
+def date_callback(call):
+    chat_id = call.message.chat.id
     try:
-        # Extract the time from the user's input
-        time_obj = datetime.strptime(message.text, '%H:%M').time()
-
-        # Construct the date and time string
-        date_and_time_str = f"{user_data[message.chat.id]['date']} {time_obj.strftime('%H:%M')}"
-        user_data[message.chat.id]['date'] = date_and_time_str
-
-        # Display a confirmation of the date and time
-        bot.send_message(message.chat.id, f"📅 Вы выбрали: {date_and_time_str}")
-
-        # Proceed to the next step
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        markup.add(types.KeyboardButton('Плановое'),
-                   types.KeyboardButton('Срочное'),
-                   types.KeyboardButton('Техническое'))
-        bot.send_message(message.chat.id, "🔧 Какой тип ТО Вам нужен?", reply_markup=markup)
-
-        # Set state to SERVICE
-        bot.set_state(message.chat.id, UserStates.SERVICE)
-        bot.register_next_step_handler(message, get_service_type)
+        _, year, month, day = call.data.split('_')
+        user_data[chat_id]['year'] = year
+        user_data[chat_id]['month'] = month
+        user_data[chat_id]['day'] = day
+        
+        bot.send_message(chat_id, f"Вы выбрали дату: {day}.{month}.{year}\nПожалуйста, подтвердите запись.")
+        user_data[chat_id]['state'] = UserStates.CONFIRMATION
+        
+        confirm_markup = types.InlineKeyboardMarkup()
+        confirm_markup.add(types.InlineKeyboardButton('Подтвердить запись', callback_data='confirm'))
+        bot.send_message(chat_id, "Подтвердите вашу запись:", reply_markup=confirm_markup)
 
     except ValueError:
-        bot.send_message(message.chat.id, "Неверный формат времени. Пожалуйста, введите время в формате HH:MM.")
-        bot.register_next_step_handler(message, get_time)
+        bot.send_message(chat_id, "Произошла ошибка при выборе даты. Пожалуйста, попробуйте снова.")
 
-# Get service type from user
-@bot.message_handler(func=lambda message: bot.get_state(message.chat.id) == UserStates.SERVICE)
-def get_service_type(message):
-    user_data[message.chat.id]['service'] = message.text
+# Обработчик подтверждения записи
+@bot.callback_query_handler(func=lambda call: call.data == 'confirm')
+def confirm_callback(call):
+    chat_id = call.message.chat.id
+    # Логика подтверждения
+    bot.send_message(chat_id, "🎉 Отлично! Ваша запись успешно создана. Мы свяжемся с Вами для подтверждения.")
 
-    # Confirmation message
-    confirmation_msg = f"""
-    ✅ Подтвердите вашу запись:
 
-    Модель: {user_data[message.chat.id]['model']}
-    Госномер: {user_data[message.chat.id]['number']}
-    Дата и время: {user_data[message.chat.id]['date']} 
-    Тип ТО: {user_data[message.chat.id]['service']}
-
-    Все верно?
-    """
-
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add(types.KeyboardButton('Да'), types.KeyboardButton('Нет'))
-    bot.send_message(message.chat.id, confirmation_msg, reply_markup=markup)
-
-    # Set state to CONFIRMATION
-    bot.set_state(message.chat.id, UserStates.CONFIRMATION)
-
-    bot.register_next_step_handler(message, process_confirmation)
-
-# Process confirmation from user
-@bot.message_handler(func=lambda message: bot.get_state(message.chat.id) == UserStates.CONFIRMATION)
-def process_confirmation(message):
-    if message.text == 'Да':
-        # Save appointment to database or perform other actions
-        bot.send_message(message.chat.id, "🎉 Отлично! Ваша запись успешно создана. Мы свяжемся с Вами для подтверждения.")
-    else:
-        bot.send_message(message.chat.id, "😔 Пожалуйста, попробуйте снова.")
-
-    # Reset state
-    bot.delete_state(message.chat.id)
-
-    # Clear user data
-    del user_data[message.chat.id]
-
-if __name__ == '__main__':
-    bot.polling(none_stop=True, interval=0)
-#
+if __name__ == "__main__":
+    bot.polling(none_stop=True)
